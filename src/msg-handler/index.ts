@@ -435,8 +435,30 @@ export class MessageHandler {
       return;
     }
 
+    const opponentId = GameEngine.getOpponentIdPlayer(game, data.indexPlayer);
+    if (!opponentId) {
+      console.log(`Result: Attack failed - opponent not found`);
+      return;
+    }
+
+    const opponent = game.players.get(opponentId);
+    if (!opponent) {
+      console.log(`Result: Attack failed - opponent player not found`);
+      return;
+    }
+
+    const cellKey = `${data.x},${data.y}`;
+
+    if (!opponent.board) {
+      opponent.board = new Map<string, 'hit' | 'miss'>();
+    }
+
+    if (opponent.board.has(cellKey)) {
+      console.log(`Result: Attack failed\x1b[31m - cell (${data.x}, ${data.y}) already attacked\x1b[0m`);
+      return;
+    }
+
     const result = GameEngine.attack(game, data.indexPlayer, data.x, data.y);
-    console.log(`Result: Attack at (${data.x}, ${data.y}) - ${result.status}`);
 
     const attackResponse: AttackResponse = {
       position: { x: data.x, y: data.y },
@@ -456,7 +478,6 @@ export class MessageHandler {
       }
     }
 
-    const opponentId = GameEngine.getOpponentIdPlayer(game, data.indexPlayer);
     if (opponentId && GameEngine.isGameFinished(game, opponentId)) {
       game.finished = true;
       console.log(`Result: Game ${game.idGame} finished, winner: ${data.indexPlayer}`);
@@ -508,6 +529,16 @@ export class MessageHandler {
     }
 
     const result = GameEngine.randomAttack(game, data.indexPlayer);
+
+    const opponentId = GameEngine.getOpponentIdPlayer(game, data.indexPlayer);
+    const opponent = game.players.get(opponentId || '');
+    const cellKey = `${result.position.x},${result.position.y}`;
+
+    if (opponent?.board?.has(cellKey)) {
+      console.log(`Result: Attack failed\x1b[31m - cell already attacked\x1b[0m`);
+      return;
+    }
+
     console.log(`Result: Random attack at (${result.position.x}, ${result.position.y}) - ${result.status}`);
 
     const attackResponse: AttackResponse = {
@@ -528,7 +559,7 @@ export class MessageHandler {
       }
     }
 
-    const opponentId = GameEngine.getOpponentIdPlayer(game, data.indexPlayer);
+    // const opponentId = GameEngine.getOpponentIdPlayer(game, data.indexPlayer);
     if (opponentId && GameEngine.isGameFinished(game, opponentId)) {
       game.finished = true;
       console.log(`Result: Game ${game.idGame} finished, winner: ${data.indexPlayer}`);
