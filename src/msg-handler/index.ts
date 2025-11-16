@@ -15,6 +15,9 @@ import {
   FinishResponse,
   RoomUpdate,
   Winner,
+  Ship,
+  Player,
+  Game
 } from '../types';
 import { GameEngine } from '../game-engine';
 
@@ -101,6 +104,9 @@ export class MessageHandler {
         case 'randomAttack':
           this.handleRandomAttack(ws, data as RandomAttackRequest);
           break;
+        case 'single_play':
+          this.handleSinglePlay(ws);
+          break;
         default:
           console.log(`Unknown command type: ${msg.type}`);
       }
@@ -181,6 +187,129 @@ export class MessageHandler {
     });
   }
 
+  private handleSinglePlay(ws: WebSocket): void {
+    const playerIndex = this.getPlayerIndexByWs(ws);
+    if (!playerIndex) {
+      console.log('Result: Single play failed - player not found');
+      return;
+    }
+
+    const botPlayer: Player = {
+      name: 'Bot',
+      index: 'bot_' + Date.now(),
+      password: '',
+      wins: 0,
+    };
+
+    const room = db.createRoom(playerIndex);
+    db.addPlayerToRoom(room.roomId, botPlayer.index);
+
+    console.log(`Result: Bot game room ${room.roomId} created for player ${playerIndex}`);
+
+    const game = db.createGame(room.roomId);
+    console.log(`Result: Game ${game.idGame} created for room ${room.roomId}`);
+
+    const playerWs = this.wsConnections.get(playerIndex);
+    if (playerWs && playerWs.readyState === WebSocket.OPEN) {
+      const humanGamePlayer = Array.from(game.players.values()).find(
+        gp => gp.playerIndex === playerIndex
+      );
+
+      if (humanGamePlayer) {
+        const createGameData: CreateGameResponse = {
+          idGame: game.idGame,
+          idPlayer: humanGamePlayer.idPlayer,
+        };
+        this.sendMessage(playerWs, 'create_game', createGameData);
+      }
+    }
+
+    this.generateBotShips(game, botPlayer.index);
+  }
+
+  private generateBotShips(game: Game, botPlayerIndex: string): void {
+    const botGamePlayer = Array.from(game.players.values()).find(
+      gp => gp.playerIndex === botPlayerIndex
+    );
+
+    if (!botGamePlayer) return;
+
+    const ships: Ship[] = [];
+    const shipTypes: Array<{ type: 'huge' | 'large' | 'medium' | 'small'; length: number; count: number }> = [
+      { type: 'huge', length: 4, count: 1 },
+      { type: 'large', length: 3, count: 2 },
+      { type: 'medium', length: 2, count: 3 },
+      { type: 'small', length: 1, count: 4 },
+    ];
+
+    const board: number[][] = Array(10).fill(0).map(() => Array(10).fill(0));
+
+    const canPlaceShip = (x: number, y: number, length: number, direction: boolean): boolean => {
+      if (direction) {
+        if (x + length > 10) return false;
+        for (let i = -1; i <= length; i++) {
+          for (let j = -1; j <= 1; j++) {
+            const checkX = x + i;
+            const checkY = y + j;
+            if (checkX >= 0 && checkX < 10 && checkY >= 0 && checkY < 10) {
+              if (board[checkY][checkX] !== 0) return false;
+            }
+          }
+        }
+      } else {
+        if (y + length > 10) return false;
+        for (let i = -1; i <= 1; i++) {
+          for (let j = -1; j <= length; j++) {
+            const checkX = x + i;
+            const checkY = y + j;
+            if (checkX >= 0 && checkX < 10 && checkY >= 0 && checkY < 10) {
+              if (board[checkY][checkX] !== 0) return false;
+            }
+          }
+        }
+      }
+      return true;
+    };
+
+    const placeShip = (x: number, y: number, length: number, direction: boolean): void => {
+      if (direction) {
+        for (let i = 0; i < length; i++) {
+          board[y][x + i] = 1;
+        }
+      } else {
+        for (let i = 0; i < length; i++) {
+          board[y + i][x] = 1;
+        }
+      }
+    };
+
+    shipTypes.forEach(({ type, length, count }) => {
+      for (let i = 0; i < count; i++) {
+        let placed = false;
+        let attempts = 0;
+        while (!placed && attempts < 100) {
+          const x = Math.floor(Math.random() * 10);
+          const y = Math.floor(Math.random() * 10);
+          const direction = Math.random() < 0.5;
+
+          if (canPlaceShip(x, y, length, direction)) {
+            placeShip(x, y, length, direction);
+            ships.push({
+              position: { x, y },
+              direction,
+              length,
+              type,
+            });
+            placed = true;
+          }
+          attempts++;
+        }
+      }
+    });
+
+    GameEngine.addShipsToPlayer(botGamePlayer, ships);
+  }
+
   private handleAddShips(ws: WebSocket, data: AddShipsRequest): void {
     const game = db.getGame(data.gameId);
     if (!game) {
@@ -222,7 +351,76 @@ export class MessageHandler {
         currentPlayer: game.currentTurn,
       };
       this.broadcastToGame(game.idGame, 'turn', turnData);
+
+      const currentPlayer = game.players.get(game.currentTurn);
+      if (currentPlayer && currentPlayer.playerIndex.startsWith('bot_')) {
+        this.handleBotTurn(game);
+      }
     }
+  }
+
+  private handleBotTurn(game: Game): void {
+    setTimeout(() => {
+      const botGamePlayer = Array.from(game.players.values()).find(
+        gp => gp.playerIndex.startsWith('bot_')
+      );
+
+      if (!botGamePlayer || game.currentTurn !== botGamePlayer.idPlayer) {
+        return;
+      }
+
+      const result = GameEngine.randomAttack(game, botGamePlayer.idPlayer);
+      console.log(`Result: Bot attack at (${result.position.x}, ${result.position.y}) - ${result.status}`);
+
+      const attackResponse: AttackResponse = {
+        position: result.position,
+        currentPlayer: botGamePlayer.idPlayer,
+        status: result.status,
+      };
+      this.broadcastToGame(game.idGame, 'attack', attackResponse);
+
+      if (result.status === 'killed' && result.missPositions) {
+        for (const pos of result.missPositions) {
+          const missResponse: AttackResponse = {
+            position: pos,
+            currentPlayer: botGamePlayer.idPlayer,
+            status: 'miss',
+          };
+          this.broadcastToGame(game.idGame, 'attack', missResponse);
+        }
+      }
+
+      const opponentId = GameEngine.getOpponentIdPlayer(game, botGamePlayer.idPlayer);
+      if (opponentId && GameEngine.isGameFinished(game, opponentId)) {
+        game.finished = true;
+        console.log(`Result: Game ${game.idGame} finished, winner: ${botGamePlayer.idPlayer}`);
+
+        const finishData: FinishResponse = {
+          winPlayer: botGamePlayer.idPlayer,
+        };
+        this.broadcastToGame(game.idGame, 'finish', finishData);
+
+        const room = db.getRoom(game.roomId);
+        if (room) {
+          db.removeRoom(room.roomId);
+        }
+        db.removeGame(game.idGame);
+        return;
+      }
+
+      if (result.status === 'miss' || result.status === 'killed') {
+        game.currentTurn = opponentId || game.currentTurn;
+      }
+
+      const turnData: TurnResponse = {
+        currentPlayer: game.currentTurn,
+      };
+      this.broadcastToGame(game.idGame, 'turn', turnData);
+
+      if (result.status === 'shot' || result.status === 'killed') {
+        this.handleBotTurn(game);
+      }
+    }, 1000);
   }
 
   private handleAttack(ws: WebSocket, data: AttackRequest): void {
@@ -290,6 +488,11 @@ export class MessageHandler {
       currentPlayer: game.currentTurn,
     };
     this.broadcastToGame(game.idGame, 'turn', turnData);
+
+    const currentPlayer = game.players.get(game.currentTurn);
+    if (currentPlayer && currentPlayer.playerIndex.startsWith('bot_')) {
+      this.handleBotTurn(game);
+    }
   }
 
   private handleRandomAttack(ws: WebSocket, data: RandomAttackRequest): void {
@@ -357,6 +560,11 @@ export class MessageHandler {
       currentPlayer: game.currentTurn,
     };
     this.broadcastToGame(game.idGame, 'turn', turnData);
+
+    const currentPlayer = game.players.get(game.currentTurn);
+    if (currentPlayer && currentPlayer.playerIndex.startsWith('bot_')) {
+      this.handleBotTurn(game);
+    }
   }
 
   private sendUpdateRoom(): void {
